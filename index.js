@@ -2,6 +2,7 @@
 import express from "express";
 import cors from "cors";
 import qrcode from "qrcode-terminal";
+process.env.DEBUG = ''; // Disable Baileys debug logs
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
@@ -43,9 +44,7 @@ async function startWhatsApp() {
     auth: state,
     browser: ["Ubuntu", "Chrome", "20.0"],
     printQRInTerminal: false,
-     logger: {
-    level: silentLogger
-  }
+     logger: silentLogger
   });
 
   sock.ev.on("creds.update", saveCreds);
