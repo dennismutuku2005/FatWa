@@ -18,6 +18,17 @@ const MAX_RETRIES = 5;
 let sock;
 let isConnected = false;
 
+const silentLogger = {
+  level: 'silent',
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  trace: () => {},
+  fatal: () => {},
+  child: () => silentLogger // This fixes the error
+};
+
 // 🚀 Start WhatsApp connection
 async function startWhatsApp() {
  
@@ -33,7 +44,7 @@ async function startWhatsApp() {
     browser: ["Ubuntu", "Chrome", "20.0"],
     printQRInTerminal: false,
      logger: {
-    level: 'silent' // This disables all logs
+    level: silentLogger
   }
   });
 
