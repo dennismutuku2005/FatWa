@@ -32,6 +32,9 @@ async function startWhatsApp() {
     auth: state,
     browser: ["Ubuntu", "Chrome", "20.0"],
     printQRInTerminal: false,
+     logger: {
+    level: 'silent' // This disables all logs
+  }
   });
 
   sock.ev.on("creds.update", saveCreds);
