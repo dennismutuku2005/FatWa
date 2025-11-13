@@ -38,7 +38,7 @@ const silentLogger = {
 async function startWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState("./auth_info");
 
-  const version = [2, 3000, 1027934701]; // Latest WA Web version as of June 2024
+  const version = [2, 3000, 1023223821]; // Latest WA Web version as of June 2024
   console.log("🆕 Using WA Web version:", version);
 
   sock = makeWASocket({
