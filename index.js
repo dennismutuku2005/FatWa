@@ -1,4 +1,4 @@
-// 📱 WhatsApp Baileys Server (No old ping) with Duplicate Protection
+// 📱 WhatsApp Baileys Server with Duplicate Protection
 import express from "express";
 import cors from "cors";
 import qrcode from "qrcode-terminal";
@@ -6,6 +6,7 @@ process.env.DEBUG = ''; // Disable Baileys debug logs
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
+  fetchLatestBaileysVersion
 } from "@whiskeysockets/baileys";
 
 const app = express();
@@ -13,64 +14,136 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = 4050;
-const RETRY_DELAY = 3000;
-const MAX_RETRIES = 5;
+const RETRY_DELAY = 5000; // Increased delay for reconnection
+const MAX_RETRIES = 10;
 const DUPLICATE_BLOCK_TIME = 15000; // 15 seconds
 
 let sock;
 let isConnected = false;
+let retryCount = 0;
 
 // Store recent messages to prevent duplicates
 const recentMessages = new Map();
 
-const silentLogger = {
-  level: 'silent',
-  debug: () => {},
-  info: () => {},
-  warn: () => {},
-  error: () => {},
-  trace: () => {},
-  fatal: () => {},
-  child: () => silentLogger
-};
-
 // 🚀 Start WhatsApp connection
 async function startWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState("./auth_info");
+  try {
+    console.log("🔄 Starting WhatsApp connection...");
+    
+    const { state, saveCreds } = await useMultiFileAuthState("./auth_info");
+    
+    // ✅ FIX: Use dynamic version instead of hardcoded
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(`🆕 Using WA Version: ${version.join('.')}, Latest: ${isLatest}`);
 
-  const version = [2, 3000, 1023223821]; // Latest WA Web version as of June 2024
-  console.log("🆕 Using WA Web version:", version);
+    sock = makeWASocket({
+      version, // ✅ This will use the correct latest version
+      auth: state,
+      printQRInTerminal: false, // ✅ Fixed: Remove deprecated option
+      // ✅ FIXED: Remove incompatible logger configuration
+      browser: ["Ubuntu", "Chrome", "120.0.0.0"],
+      markOnlineOnConnect: true,
+      connectTimeoutMs: 60000,
+      keepAliveIntervalMs: 20000,
+      retryRequestDelayMs: 2000,
+      maxRetries: 3,
+      emitOwnEvents: true,
+      defaultQueryTimeoutMs: 60000,
+    });
 
-  sock = makeWASocket({
-    version,
-    auth: state,
-    browser: ["Ubuntu", "Chrome", "20.0"],
-    printQRInTerminal: false,
-    logger: silentLogger
-  });
+    // Save credentials when updated
+    sock.ev.on("creds.update", saveCreds);
 
-  sock.ev.on("creds.update", saveCreds);
+    // Handle connection updates
+    sock.ev.on("connection.update", async (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-  sock.ev.on("connection.update", (update) => {
-    const { connection, lastDisconnect, qr } = update;
+      // ✅ FIXED: Handle QR code generation manually
+      if (qr) {
+        console.log("📸 Scan this QR code:");
+        qrcode.generate(qr, { small: true });
+        isConnected = false;
+        retryCount = 0; // Reset retry count when QR is generated
+      }
 
-    if (qr) {
-      console.log("📸 Scan this QR code in your WhatsApp app:");
-      qrcode.generate(qr, { small: true });
-      isConnected = false;
+      if (connection === "close") {
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const error = lastDisconnect?.error;
+        
+        console.log(`❌ Connection closed - Code: ${statusCode}, Error: ${error?.message}`);
+        
+        // Handle different disconnect reasons
+        switch (statusCode) {
+          case DisconnectReason.connectionClosed:
+            console.log("🔄 Connection closed, reconnecting...");
+            break;
+          case DisconnectReason.connectionLost:
+            console.log("🔌 Connection lost, reconnecting...");
+            break;
+          case DisconnectReason.connectionReplaced:
+            console.log("📱 Connection replaced from another device");
+            break;
+          case DisconnectReason.restartRequired:
+            console.log("🔄 Restart required, reconnecting...");
+            break;
+          case DisconnectReason.timedOut:
+            console.log("⏰ Connection timeout, reconnecting...");
+            break;
+          default:
+            console.log(`🔄 Unknown disconnect (${statusCode}), reconnecting...`);
+        }
+
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        isConnected = false;
+
+        if (shouldReconnect && retryCount < MAX_RETRIES) {
+          retryCount++;
+          console.log(`🔄 Reconnect attempt ${retryCount}/${MAX_RETRIES} in ${RETRY_DELAY/1000}s...`);
+          setTimeout(() => {
+            startWhatsApp();
+          }, RETRY_DELAY);
+        } else if (retryCount >= MAX_RETRIES) {
+          console.log("❌ Max reconnection attempts reached. Please restart the server.");
+        }
+      } 
+      else if (connection === "open") {
+        console.log("✅ WhatsApp connected successfully!");
+        isConnected = true;
+        retryCount = 0; // Reset retry count on successful connection
+        
+        if (sock.user) {
+          console.log(`👤 Connected as: ${sock.user.name || sock.user.id}`);
+          console.log(`📱 Phone: ${sock.user.phone}`);
+        }
+      }
+      else if (connection === "connecting") {
+        console.log("🔄 Connecting to WhatsApp...");
+        isConnected = false;
+      }
+    });
+
+    // Handle connection errors
+    sock.ev.on("connection.update", (update) => {
+      if (update.connection === "close" && update.lastDisconnect) {
+        console.log("📊 Connection details:", {
+          statusCode: update.lastDisconnect.error?.output?.statusCode,
+          error: update.lastDisconnect.error?.message,
+          retryCount
+        });
+      }
+    });
+
+  } catch (error) {
+    console.error("❌ Failed to start WhatsApp:", error);
+    
+    if (retryCount < MAX_RETRIES) {
+      retryCount++;
+      console.log(`🔄 Initial connection retry ${retryCount}/${MAX_RETRIES} in ${RETRY_DELAY/1000}s...`);
+      setTimeout(() => {
+        startWhatsApp();
+      }, RETRY_DELAY);
     }
-
-    if (connection === "close") {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      console.log(`❌ Disconnected (code ${statusCode}). Reconnect: ${shouldReconnect}`);
-      isConnected = false;
-      if (shouldReconnect) startWhatsApp();
-    } else if (connection === "open") {
-      console.log("✅ WhatsApp connected successfully!");
-      isConnected = true;
-    }
-  });
+  }
 }
 
 // 🔍 Check if message is duplicate
@@ -81,11 +154,10 @@ function isDuplicateMessage(jid, message) {
   if (lastSent) {
     const timeSinceLastSend = Date.now() - lastSent;
     if (timeSinceLastSend < DUPLICATE_BLOCK_TIME) {
-      return true; // Duplicate detected
+      return true;
     }
   }
   
-  // Update the timestamp for this message
   recentMessages.set(key, Date.now());
   return false;
 }
@@ -100,31 +172,41 @@ function cleanupOldEntries() {
   }
 }
 
-// Set up periodic cleanup (every 30 seconds)
+// Set up periodic cleanup
 setInterval(cleanupOldEntries, 30000);
 
 // ✉️ Message sending with retry and duplicate protection
-async function sendWithRetry(jid, message, retryCount = 0) {
+async function sendWithRetry(jid, message, messageRetryCount = 0) {
   try {
     if (!isConnected || !sock) {
-      if (retryCount >= MAX_RETRIES) {
-        throw new Error("Max retry attempts reached. Socket not connected.");
+      if (messageRetryCount >= 3) {
+        throw new Error("WhatsApp not connected after 3 attempts");
       }
-      console.log(`🕒 Retrying in ${RETRY_DELAY / 1000}s (Attempt ${retryCount + 1}/${MAX_RETRIES})`);
+      console.log(`🕒 Waiting for connection... (Attempt ${messageRetryCount + 1}/3)`);
       await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-      return sendWithRetry(jid, message, retryCount + 1);
+      return sendWithRetry(jid, message, messageRetryCount + 1);
     }
 
     // Check for duplicate message
     if (isDuplicateMessage(jid, message)) {
-      console.log(`⏳ Duplicate message blocked for ${jid}. Waiting ${DUPLICATE_BLOCK_TIME/1000}s cooldown.`);
-      return { success: true, duplicate: true, message: "Message appears to be duplicate but marked as sent" };
+      console.log(`⏳ Duplicate message blocked for ${jid}`);
+      return { success: true, duplicate: true };
     }
 
-    await sock.sendMessage(jid, { text: message });
-    return { success: true, duplicate: false };
+    // Send message using Baileys
+    const result = await sock.sendMessage(jid, { text: message });
+    
+    console.log(`✅ Message sent to ${jid}`);
+    return { success: true, duplicate: false, messageId: result.key?.id };
+
   } catch (error) {
-    console.error("Send message error:", error);
+    console.error("❌ Send message error:", error.message);
+    
+    if (messageRetryCount < 2 && error.message?.includes('not connected')) {
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+      return sendWithRetry(jid, message, messageRetryCount + 1);
+    }
+    
     throw error;
   }
 }
@@ -133,32 +215,40 @@ async function sendWithRetry(jid, message, retryCount = 0) {
 app.post("/send", async (req, res) => {
   try {
     const { number, message } = req.body;
+    
     if (!number || !message) {
-      return res.status(400).json({ error: "Please provide 'number' and 'message'" });
+      return res.status(400).json({ 
+        error: "Missing number or message",
+        received: { number: !!number, message: !!message }
+      });
     }
 
     const jid = number.includes("@") ? number : number + "@s.whatsapp.net";
-    const result = await sendWithRetry(jid, message);
     
-    if (result.duplicate) {
-      res.json({
-        status: "Message appears to be duplicate but marked as sent",
-        to: jid,
-        duplicate: true,
-        cooldown: `${DUPLICATE_BLOCK_TIME/1000} seconds`,
-        timestamp: new Date().toISOString(),
-      });
-    } else {
-      res.json({
-        status: "Message sent",
-        to: jid,
-        duplicate: false,
-        timestamp: new Date().toISOString(),
+    if (!jid.match(/^\d+@s\.whatsapp\.net$/)) {
+      return res.status(400).json({ 
+        error: "Invalid number format. Use: 254712345678"
       });
     }
+
+    const result = await sendWithRetry(jid, message);
+    
+    res.json({
+      status: "success",
+      message: result.duplicate ? "Duplicate blocked" : "Message sent",
+      to: jid,
+      duplicate: result.duplicate,
+      cooldown: result.duplicate ? `${DUPLICATE_BLOCK_TIME/1000}s` : null,
+      timestamp: new Date().toISOString(),
+    });
+    
   } catch (error) {
-    console.error("❌ Failed to send message:", error);
-    res.status(503).json({ error: "Failed to send message", details: error.message });
+    console.error("❌ API Error:", error.message);
+    res.status(503).json({ 
+      error: "Failed to send message", 
+      details: error.message,
+      timestamp: new Date().toISOString()
+    });
   }
 });
 
@@ -167,34 +257,57 @@ app.get("/status", (req, res) => {
   res.json({
     connected: isConnected,
     status: isConnected ? "Ready" : "Connecting...",
-    duplicate_protection: "Active (15 seconds cooldown)",
-    recent_messages_tracked: recentMessages.size,
+    retry_count: retryCount,
+    max_retries: MAX_RETRIES,
+    duplicate_protection: {
+      active: true,
+      cooldown: `${DUPLICATE_BLOCK_TIME/1000}s`,
+      tracked_messages: recentMessages.size
+    },
     timestamp: new Date().toISOString(),
   });
 });
 
-// 🧹 Clear duplicates endpoint (for testing/maintenance)
+// 🧹 Clear duplicates endpoint
 app.delete("/clear-duplicates", (req, res) => {
   const previousSize = recentMessages.size;
   recentMessages.clear();
   res.json({
+    status: "success",
     cleared: true,
     previous_entries: previousSize,
-    message: "Duplicate protection cache cleared"
+    message: "Duplicate cache cleared"
+  });
+});
+
+// 🏠 Home endpoint
+app.get("/", (req, res) => {
+  res.json({
+    service: "WhatsApp Baileys Server",
+    status: isConnected ? "Connected" : "Waiting for QR scan",
+    endpoints: {
+      "POST /send": "Send message",
+      "GET /status": "Check status", 
+      "DELETE /clear-duplicates": "Clear cache"
+    }
   });
 });
 
 // 🧼 Clean up on exit
 process.on("SIGINT", () => {
-  console.log("🔄 Cleaning up before exit...");
+  console.log("🔄 Cleaning up...");
   recentMessages.clear();
+  if (sock) {
+    sock.end();
+  }
   process.exit();
 });
 
+// Start the server
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`🛡️ Duplicate protection active: ${DUPLICATE_BLOCK_TIME/1000} seconds cooldown`);
+  
+  // Start WhatsApp connection
+  startWhatsApp();
 });
-
-// Start the socket
-startWhatsApp().catch(console.error);
