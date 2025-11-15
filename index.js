@@ -35,9 +35,9 @@ async function startWhatsApp() {
     // ✅ FIX: Use dynamic version instead of hardcoded
     const { version, isLatest } = await fetchLatestBaileysVersion();
     console.log(`🆕 Using WA Version: ${version.join('.')}, Latest: ${isLatest}`);
-
+    const CUSTOM_WHATSAPP_VERSION = [2, 3000, 1029950210];
     sock = makeWASocket({
-      version, // ✅ This will use the correct latest version
+      version:CUSTOM_WHATSAPP_VERSION, // ✅ This will use the correct latest version
       auth: state,
       printQRInTerminal: false, // ✅ Fixed: Remove deprecated option
       // ✅ FIXED: Remove incompatible logger configuration
